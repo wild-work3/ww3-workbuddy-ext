@@ -8,16 +8,26 @@
   * 已有条目里的历史字段（更早的 versions、人工补的 gateway 门、changelog）一律保留：
     本脚本只做 upsert，不做重建。
   * 内容真没变时**连 updated_at 都不动**，否则每次 CI 都产生空 diff 的 PR。
+  * 同一版本号为每个平台各出一条 versions[]，**去重/替换键是 (version, os, arch) 复合键**
+    （W3-55）——只按版本号会互相顶掉，最后只剩一个平台能装。
 
-用法：
+用法（单平台）：
   python scripts/make_registry_entry.py \
       --manifest dist/manifest.json \
-      --zip dist/workbuddy-1.0.0.zip \
+      --zip dist/workbuddy-1.0.0-windows-amd64.zip \
       --summary conformance-summary.json \
       --repo https://github.com/wild-work3/ww3-workbuddy-ext \
       --os windows --arch amd64 \
       --base .registry/workbuddy.json --out .registry/workbuddy.json \
       [--changelog "..."]
+
+用法（多平台，CI 把 6 个平台的产物收齐后跑一次）：
+  python scripts/make_registry_entry.py \
+      --manifest dist/manifest.json \
+      --artifact windows/amd64=dist/workbuddy-1.0.0-windows-amd64.zip \
+      --artifact linux/arm64=dist/workbuddy-1.0.0-linux-arm64.zip \
+      --summary conformance-summary.json \
+      --repo ... --base ... --out ...
 
 退出码：0 成功（含「内容无变化」），1 参数/文件错误。
 """
@@ -71,14 +81,40 @@ def ordered(d, order):
     return out
 
 
-def build(man, zpath, summary, repo, osname, arch, base, changelog):
+def vkey(x):
+    """versions[] 的复合键：同一版本号每平台一条，不能只用版本号去重（W3-55）。"""
+    return (x.get("version") or "", x.get("os") or "any", x.get("arch") or "any")
+
+
+def parse_artifacts(a):
+    """把 --artifact os/arch=path 与单平台 --zip/--os/--arch 统一成 [(os,arch,path)]。"""
+    out = []
+    for spec in a.artifact or []:
+        plat, sep, path = spec.partition("=")
+        if not sep or not path:
+            raise SystemExit("--artifact 格式应为 os/arch=包路径，实际: %s" % spec)
+        goos, _, goarch = plat.partition("/")
+        if not goos or not goarch:
+            raise SystemExit("--artifact 平台格式应为 os/arch，实际: %s" % plat)
+        out.append((goos.strip(), goarch.strip(), path.strip()))
+    if a.zip:
+        out.append((a.os, a.arch, a.zip))
+    if not out:
+        raise SystemExit("至少要给一个 --artifact os/arch=包 或 --zip")
+    for _, _, p in out:
+        if not os.path.isfile(p):
+            raise SystemExit("包不存在: %s" % p)
+    return out
+
+
+def build(man, arts, summary, repo, base, changelog):
     ver = man.get("version") or ""
     pid = man.get("id") or ""
     if not ver or not pid:
         raise SystemExit("manifest 缺 id/version")
 
     old = dict(base) if base else {}
-    old_vers = {x.get("version"): x for x in (old.get("versions") or [])}
+    old_vers = {vkey(x): x for x in (old.get("versions") or [])}
 
     e = {
         "schema": SCHEMA,
@@ -105,27 +141,45 @@ def build(man, zpath, summary, repo, osname, arch, base, changelog):
     elif old.get("capabilities"):
         e["capabilities"] = old["capabilities"]
 
-    v = {
-        "version": ver,
-        "file": os.path.basename(zpath),
-        "sha256": sha256_of(zpath),
-        "size": os.path.getsize(zpath),
-        "os": osname,
-        "arch": arch,
-        "protocol": man.get("protocol") or {"min": 1, "max": 1},
-    }
-    prev = old_vers.get(ver) or {}
-    if prev.get("gateway"):
-        v["gateway"] = prev["gateway"]           # 版本门是人工维护的，脚本不改它
-    v["changelog"] = changelog or prev.get("changelog") or ("首个版本" if not old_vers else "")
+    # 同一版本的其它平台条目里带过的 changelog / gateway 门可以作为本平台默认值
+    # （6 个平台写同一句说明、同一个版本门；人工只需要维护一条）
+    ver_cl = next((x.get("changelog") for x in old_vers.values()
+                   if x.get("version") == ver and x.get("changelog")), "")
+    ver_gate = next((x.get("gateway") for x in old_vers.values()
+                     if x.get("version") == ver and x.get("gateway")), {})
 
-    vers = [x for k, x in old_vers.items() if k != ver]
-    vers.append(v)
-    vers.sort(key=lambda x: x.get("version") or "", reverse=True)  # 新版本在前
+    new_vers = []
+    for goos, goarch, zpath in arts:
+        v = {
+            "version": ver,
+            "file": os.path.basename(zpath),
+            "sha256": sha256_of(zpath),
+            "size": os.path.getsize(zpath),
+            "os": goos,
+            "arch": goarch,
+            "protocol": man.get("protocol") or {"min": 1, "max": 1},
+        }
+        prev = old_vers.get(vkey(v)) or {}
+        # 版本门是人工维护的，脚本不改它；本平台没写过就继承同版本其它平台的
+        gate = prev.get("gateway") or ver_gate
+        if gate:
+            v["gateway"] = gate
+        cl = changelog or prev.get("changelog") or ver_cl or ("首个版本" if not old_vers else "")
+        if cl:
+            v["changelog"] = cl
+        new_vers.append(v)
+
+    # 只替换本次涉及的那些 (version, os, arch)，其余历史条目原样保留
+    replaced = {vkey(v) for v in new_vers}
+    vers = [x for k, x in old_vers.items() if k not in replaced] + new_vers
+    # 新版本在前；同版本按平台字典序，保证输出稳定（否则 diff 会随 dict 顺序抖）
+    vers.sort(key=lambda x: (x.get("version") or "", x.get("os") or "", x.get("arch") or ""),
+              reverse=True)
     e["versions"] = [ordered(x, VER_ORDER) for x in vers]
 
     # updated_at 只在版本条目真的变了时才刷新
-    same = old.get("versions") and old_vers.get(ver) == v
+    same = bool(old.get("versions")) and old_vers.get(vkey(new_vers[0])) == new_vers[0] \
+        and all(old_vers.get(vkey(v)) == v for v in new_vers)
     e["updated_at"] = (old.get("updated_at") if same else
                        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
     return ordered({k: val for k, val in e.items() if val != ""}, TOP_ORDER)
@@ -134,7 +188,9 @@ def build(man, zpath, summary, repo, osname, arch, base, changelog):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--manifest", required=True)
-    ap.add_argument("--zip", required=True)
+    ap.add_argument("--artifact", action="append", default=[],
+                    help="os/arch=包路径，可重复（多平台）")
+    ap.add_argument("--zip", default="", help="单平台便捷写法，配合 --os/--arch")
     ap.add_argument("--summary", default="", help="conformance-summary.json（可选）")
     ap.add_argument("--repo", required=True, help="插件仓地址，如 https://github.com/o/r")
     ap.add_argument("--os", default="windows")
@@ -145,8 +201,8 @@ def main():
     a = ap.parse_args()
 
     man = load_json(a.manifest)
-    entry = build(man, a.zip, load_json(a.summary, required=False),
-                  a.repo, a.os, a.arch, load_json(a.base, required=False), a.changelog)
+    entry = build(man, parse_artifacts(a), load_json(a.summary, required=False),
+                  a.repo, load_json(a.base, required=False), a.changelog)
 
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     text = json.dumps(entry, ensure_ascii=False, indent=2) + "\n"
@@ -158,8 +214,11 @@ def main():
         f.write(text)
 
     changed = old.strip() != text.strip()
-    print("[registry] %s %s -> %s (%s)" % (entry["id"], entry["versions"][0]["version"],
-                                           a.out, "已更新" if changed else "无变化"))
+    plats = ", ".join("%s/%s" % (v["os"], v["arch"]) for v in entry["versions"]
+                      if v["version"] == entry["versions"][0]["version"])
+    print("[registry] %s %s [%s] -> %s (%s)" %
+          (entry["id"], entry["versions"][0]["version"], plats, a.out,
+           "已更新" if changed else "无变化"))
 
 
 if __name__ == "__main__":
