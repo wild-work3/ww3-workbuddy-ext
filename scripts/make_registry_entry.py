@@ -28,6 +28,14 @@ import os
 import sys
 from datetime import datetime, timezone
 
+# CI 里（GitHub Actions 的 Windows runner）stdout 是 cp1252，直接 print 中文会
+# UnicodeEncodeError: 'charmap' codec can't encode ...（实测踩过，退出码 1 掩盖了真实进度）
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001  非 tty / 老版本 Python 忽略即可
+        pass
+
 SCHEMA = 2
 
 # 注册表条目的规范字段序（与 ext-registry 现有文件一致，便于 PR diff）
