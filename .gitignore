@@ -9,3 +9,4 @@ dist/
 /logs/
 /stat/
 /auths/
+__pycache__/
