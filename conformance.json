@@ -1,0 +1,94 @@
+{
+  "schema": 1,
+  "id": "workbuddy",
+  "kind": "channel",
+  "model": "workbuddy/mock-flash",
+  "live_model": "workbuddy/hunyuan-t1-flash",
+  "auth": {
+    "accessToken": "mock-wb-token",
+    "domain": "copilot.tencent.com",
+    "expiresAt": 2051222400,
+    "nickname": "workbuddy-mock",
+    "refreshToken": "mock-wb-rt",
+    "uid": "workbuddy-mock"
+  },
+  "account": {
+    "nickname": "workbuddy-mock",
+    "uid": "workbuddy-mock"
+  },
+  "extra_config": {
+    "region": "workbuddy"
+  },
+  "routes": [
+    {
+      "method": "GET",
+      "path": ".*/enterprises/personal/models.*",
+      "kind": "json",
+      "body": "{\"code\":0,\"msg\":\"ok\",\"data\":{\"models\":[{\"id\":\"mock-flash\",\"name\":\"Mock Flash\",\"maxInputTokens\":128000,\"maxOutputTokens\":8192}],\"agents\":[{\"name\":\"cli\",\"models\":[\"mock-flash\"]}]}}"
+    },
+    {
+      "method": "POST",
+      "path": ".*/v2/billing/meter/get-user-resource.*",
+      "kind": "json",
+      "body": "{\"resource\":{\"total\":1000,\"used\":0,\"remain\":1000,\"unit\":\"credits\"}}"
+    },
+    {
+      "method": "POST",
+      "path": ".*/v2/billing/meter/daily-checkin.*",
+      "kind": "json",
+      "body": "{\"ok\":true,\"success\":true}"
+    },
+    {
+      "method": "GET",
+      "path": ".*/v2/billing/meter/checkin-activity-status.*",
+      "kind": "json",
+      "body": "{\"checked\":false}"
+    },
+    {
+      "method": "GET",
+      "path": ".*(models|model/list|model_catalog|recommended-models|models/available)$",
+      "kind": "json",
+      "body": "{\"data\":[{\"id\":\"mock-flash\",\"name\":\"Mock Flash\"},{\"id\":\"mock-pro\",\"name\":\"Mock Pro\"}],\"models\":[{\"id\":\"mock-flash\",\"name\":\"Mock Flash\"}],\"free\":[{\"id\":\"mock-flash\",\"name\":\"Mock Flash\"}]}"
+    },
+    {
+      "method": "POST",
+      "path": ".*/v2/chat/completions$",
+      "kind": "sse_openai",
+      "text": "你好，我是 mock 上游的回复。",
+      "chunks": 3,
+      "usage": {
+        "cache_write_tokens": 0,
+        "cached_tokens": 4,
+        "completion_tokens": 7,
+        "prompt_tokens": 13
+      }
+    },
+    {
+      "method": "GET",
+      "path": ".*(balance|points|quota|wallets|resource|profile-summary|setting_info).*",
+      "kind": "json",
+      "body": "{\"balance\":100,\"data\":{\"balance\":100},\"total\":100,\"used\":0,\"remaining\":100}"
+    },
+    {
+      "method": "POST",
+      "path": ".*(checkin|check_in|daily).*",
+      "kind": "json",
+      "body": "{\"ok\":true,\"success\":true,\"data\":{\"ok\":true}}"
+    },
+    {
+      "method": "POST",
+      "path": ".*(refresh|token).*",
+      "kind": "json",
+      "body": "{\"access_token\":\"mock-access-2\",\"accessToken\":\"mock-access-2\",\"expires_in\":7200,\"expiresIn\":7200}"
+    }
+  ],
+  "auth_prefixes": [
+    "workbuddy",
+    "workbuddyai"
+  ],
+  "notes": [
+    "双区单插件：region=workbuddy 走国内版、workbuddyai 走国际版，两套独立配额与凭据（auths/ 下按前缀分文件）。",
+    "首条消息必须是 system，否则上游 400（错误码 11-128）；插件侧自行投影，不依赖调用方。",
+    "离线模式全部打本地 mock，未访问真实上游；上游风控/对抗算法不做断言。"
+  ]
+}

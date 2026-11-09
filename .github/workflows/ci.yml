@@ -1,0 +1,53 @@
+name: ci
+
+# 日常构建/自测：push 与 PR 都跑。
+# 与 release.yml 的分工：这里只验「能编译、能过单测、manifest 自洽」，
+# 打 tag 时才做产物发布 + 契约符合性验证 + 注册表 PR。
+on:
+  push:
+    branches: ['**']
+    tags-ignore: ['v*']       # tag 交给 release.yml，避免同一提交跑两遍
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go vet
+        shell: bash
+        run: go vet ./...
+
+      - name: go test
+        shell: bash
+        run: go test ./...
+
+      - name: 构建（含 manifest 出包）
+        shell: bash
+        run: bash build.sh --zip
+
+      - name: manifest 自洽检查
+        shell: bash
+        run: |
+          set -euo pipefail
+          # manifest 由刚产出的 exe 自己吐，这里只断言关键字段齐全、id/version 与包名一致
+          man=dist/manifest.json
+          [ -f "$man" ] || { echo "缺少 $man"; exit 1; }
+          for k in id version kind protocol capabilities; do
+            grep -q "\"$k\"" "$man" || { echo "manifest 缺字段: $k"; exit 1; }
+          done
+          id=$(sed -n 's/.*"id":[[:space:]]*"\([^"]*\)".*/\1/p' "$man" | head -1)
+          ver=$(sed -n 's/.*"version":[[:space:]]*"\([^"]*\)".*/\1/p' "$man" | head -1)
+          [ -f "dist/$id-$ver.zip" ] || { echo "缺插件包 dist/$id-$ver.zip"; exit 1; }
+          echo "manifest ok: id=$id version=$ver"
+
+      - name: 产物摘要
+        shell: bash
+        run: |
+          ls -l dist/*.exe dist/*.zip dist/*.sha256 2>/dev/null || true
